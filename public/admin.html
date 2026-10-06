@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin - Portal Pelanggan</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="wrap wide"><!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin - Portal Pelanggan</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/theme.js"></script>
+</head>
+<body>
+  <div class="wrap wide">
+    <header class="bar">
+      <div>
+        <h1>Kelola Pelanggan</h1>
+        <small id="who"></small>
+      </div>
+      <div class="bar-actions">
+        <button id="theme" type="button"></button>
+        <button id="logout" type="button">Keluar</button>
+      </div>
+    </header>
+    <p id="status" class="note" role="status"></p>
+
+    <div class="admin">
+      <aside>
+        <input id="q" class="search" type="search" placeholder="Cari nama atau username" aria-label="Cari pelanggan">
+        <button id="add" class="primary" type="button">Tambah pelanggan</button>
+        <ul id="list" class="list"></ul>
+      </aside>
+      <section id="detail" class="panel"></section>
+    </div>
+  </div>
+
+  <dialog id="dAdd">
+    <form id="fAdd" class="stack">
+      <h2>Pelanggan baru</h2>
+      <label>Nama<input name="name" required maxlength="100"></label>
+      <label>Username<input name="username" required autocapitalize="none" spellcheck="false" autocomplete="off"></label>
+      <label>Password (minimal 8 karakter)<input name="password" type="text" required minlength="8" autocomplete="off"></label>
+      <p id="addErr" class="error" role="alert"></p>
+      <div class="row-btns">
+        <button class="primary" type="submit">Buat pelanggan</button>
+        <button type="button" data-close>Batal</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dPort">
+    <div class="stack">
+      <h2>Cari port di LibreNMS</h2>
+      <input id="pq" class="search" type="search" placeholder="Nama perangkat, interface, atau deskripsi" aria-label="Cari port">
+      <ul id="pres" class="list"></ul>
+      <p id="perr" class="error" role="alert"></p>
+      <div class="row-btns"><button type="button" data-close>Tutup</button></div>
+    </div>
+  </dialog>
+
+  <script>
+    const $ = (s, el = document) => el.querySelector(s);
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    let customers = [], sel = null, services = [], editing = null;
+
+    async function api(url, method = "GET", body) {
+      const r = await fetch(url, {
+        method,
+        headers: body ? { "Content-Type": "application/json" } : {},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (r.status === 401 || r.status === 403) { location.href = "/login.html"; throw new Error("auth"); }
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || "Terjadi kesalahan");
+      return data;
+    }
+    function say(msg, bad) { const s = $("#status"); s.textContent = msg; s.className = bad ? "error" : "note"; }
+    const run = (fn) => fn().catch((e) => { if (e.message !== "auth") say(e.message, true); });
+
+    // ---------- daftar pelanggan ----------
+    function renderList() {
+      const t = $("#q").value.trim().toLowerCase();
+      const rows = customers.filter((c) => `${c.name} ${c.username}`.toLowerCase().includes(t));
+      $("#list").innerHTML = rows.length
+        ? rows.map((c) => `<li><button type="button" class="item" data-id="${c.id}" aria-pressed="${c.id === sel}">
+            <strong>${esc(c.name)}</strong>
+            <span>${esc(c.username)}, ${c.services} layanan${c.active ? "" : ", nonaktif"}</span></button></li>`).join("")
+        : `<li class="empty">${customers.length ? "Tidak ada yang cocok." : "Belum ada pelanggan."}</li>`;
+    }
+    async function loadCustomers() { customers = await api("/api/admin/customers"); renderList(); }
+
+    async function select(id) {
+      sel = id; editing = null;
+      services = await api(`/api/admin/customers/${id}/services`);
+      renderList(); renderDetail();
+    }
+
+    // ---------- detail pelanggan ----------
+    function renderDetail() {
+      const c = customers.find((x) => x.id === sel);
+      const box = $("#detail");
+      if (!c) { box.innerHTML = '<p class="empty">Pilih pelanggan di daftar, atau tambah pelanggan baru.</p>'; return; }
+      const e = editing ? services.find((s) => s.id === editing) : null;
+      box.innerHTML = `
+        <h2>${esc(c.name)}</h2>
+        <p class="note">Username: ${esc(c.username)}</p>
+
+        <form id="fCust" class="inline">
+          <label>Nama<input name="name" value="${esc(c.name)}" required maxlength="100"></label>
+          <label class="check"><input name="active" type="checkbox" ${c.active ? "checked" : ""}> Akun aktif</label>
+          <button type="submit">Simpan</button>
+        </form>
+
+        <form id="fPass" class="inline">
+          <label>Password baru<input name="password" type="text" minlength="8" required autocomplete="off" placeholder="minimal 8 karakter"></label>
+          <button type="submit">Ganti password</button>
+        </form>
+
+        <h3>Layanan</h3>
+        ${services.length ? `<div class="scroll"><table>
+          <thead><tr><th>Label</th><th>Port ID</th><th></th></tr></thead>
+          <tbody>${services.map((s) => `<tr>
+            <td>${esc(s.label)}</td><td>${s.lnms_port_id}</td>
+            <td class="act"><button type="button" data-edit="${s.id}">Ubah</button>
+                <button type="button" class="danger" data-delsvc="${s.id}">Hapus</button></td></tr>`).join("")}
+          </tbody></table></div>` : '<p class="empty">Belum ada layanan.</p>'}
+
+        <form id="fSvc" class="inline">
+          <label>Label (judul kartu)<input name="label" value="${e ? esc(e.label) : ""}" required maxlength="120"></label>
+          <label>Port ID LibreNMS<input name="port" value="${e ? e.lnms_port_id : ""}" required inputmode="numeric" pattern="[0-9]+"></label>
+          <button type="button" id="findPort">Cari port</button>
+          <button class="primary" type="submit">${e ? "Simpan perubahan" : "Tambah layanan"}</button>
+          ${e ? '<button type="button" id="cancelEdit">Batal</button>' : ""}
+        </form>
+
+        <p><button type="button" class="danger" id="delCust">Hapus pelanggan ini</button></p>`;
+    }
+
+    $("#detail").addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const f = ev.target;
+      run(async () => {
+        if (f.id === "fCust") {
+          await api(`/api/admin/customers/${sel}`, "PATCH", { name: f.name.value, active: f.active.checked });
+          await loadCustomers(); renderDetail(); say("Perubahan disimpan.");
+        } else if (f.id === "fPass") {
+          await api(`/api/admin/customers/${sel}`, "PATCH", { password: f.password.value });
+          f.reset(); say("Password diganti.");
+        } else if (f.id === "fSvc") {
+          const body = { label: f.label.value, lnms_port_id: f.port.value };
+          if (editing) await api(`/api/admin/services/${editing}`, "PATCH", body);
+          else await api(`/api/admin/customers/${sel}/services`, "POST", body);
+          editing = null; say("Layanan disimpan.");
+          await loadCustomers(); await select(sel);
+        }
+      });
+    });
+
+    $("#detail").addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (t.dataset.edit) { editing = Number(t.dataset.edit); renderDetail(); $("#fSvc input").focus(); }
+      else if (t.id === "cancelEdit") { editing = null; renderDetail(); }
+      else if (t.id === "findPort") { $("#perr").textContent = ""; $("#dPort").showModal(); $("#pq").focus(); searchPorts(); }
+      else if (t.dataset.delsvc) run(async () => {
+        if (!confirm("Hapus layanan ini?")) return;
+        await api(`/api/admin/services/${t.dataset.delsvc}`, "DELETE");
+        await loadCustomers(); await select(sel); say("Layanan dihapus.");
+      });
+      else if (t.id === "delCust") run(async () => {
+        const c = customers.find((x) => x.id === sel);
+        if (!confirm(`Hapus pelanggan "${c.name}" beserta semua layanannya?`)) return;
+        await api(`/api/admin/customers/${sel}`, "DELETE");
+        sel = null; await loadCustomers(); renderDetail(); say("Pelanggan dihapus.");
+      });
+    });
+
+    $("#list").addEventListener("click", (ev) => {
+      const b = ev.target.closest(".item");
+      if (b) run(() => select(Number(b.dataset.id)));
+    });
+    $("#q").addEventListener("input", renderList);
+
+    // ---------- tambah pelanggan ----------
+    $("#add").addEventListener("click", () => { $("#fAdd").reset(); $("#addErr").textContent = ""; $("#dAdd").showModal(); });
+    $("#fAdd").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const f = ev.target;
+      try {
+        const r = await api("/api/admin/customers", "POST",
+          { name: f.name.value, username: f.username.value, password: f.password.value });
+        $("#dAdd").close();
+        await loadCustomers(); await select(r.id); say("Pelanggan dibuat. Sekarang tambahkan layanannya.");
+      } catch (e) { if (e.message !== "auth") $("#addErr").textContent = e.message; }
+    });
+
+    // ---------- cari port ----------
+    let timer;
+    async function searchPorts() {
+      const out = $("#pres");
+      try {
+        const rows = await api(`/api/admin/ports?q=${encodeURIComponent($("#pq").value)}`);
+        $("#perr").textContent = "";
+        out.innerHTML = rows.length
+          ? rows.map((p) => `<li><button type="button" class="item" data-pid="${p.port_id}" data-alias="${esc(p.ifAlias)}">
+              <strong>${esc(p.device)}: ${esc(p.ifName)}</strong>
+              <span>ID ${p.port_id}${p.ifAlias ? ", " + esc(p.ifAlias) : ""}</span></button></li>`).join("")
+          : '<li class="empty">Port tidak ditemukan.</li>';
+      } catch (e) { if (e.message !== "auth") { out.innerHTML = ""; $("#perr").textContent = e.message; } }
+    }
+    $("#pq").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(searchPorts, 250); });
+    $("#pres").addEventListener("click", (ev) => {
+      const b = ev.target.closest("[data-pid]");
+      if (!b) return;
+      const f = $("#fSvc");
+      f.port.value = b.dataset.pid;
+      if (!f.label.value && b.dataset.alias) f.label.value = b.dataset.alias;
+      $("#dPort").close(); f.label.focus();
+    });
+
+    document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
+    $("#logout").addEventListener("click", async () => { await fetch("/api/logout", { method: "POST" }); location.href = "/login.html"; });
+
+    run(async () => {
+      const me = await api("/api/me");
+      $("#who").textContent = `${me.name} (${me.username})`;
+      await loadCustomers(); renderDetail();
+    });
+  </script>
+</body>
+</html>
+    <header class="bar">
+      <div>
+        <h1>Kelola Pelanggan</h1>
+        <small id="who"></small>
+      </div>
+      <button id="logout" type="button">Keluar</button>
+    </header>
+    <p id="status" class="note" role="status"></p>
+
+    <div class="admin">
+      <aside>
+        <input id="q" class="search" type="search" placeholder="Cari nama atau username" aria-label="Cari pelanggan">
+        <button id="add" class="primary" type="button">Tambah pelanggan</button>
+        <ul id="list" class="list"></ul>
+      </aside>
+      <section id="detail" class="panel"></section>
+    </div>
+  </div>
+
+  <dialog id="dAdd">
+    <form id="fAdd" class="stack">
+      <h2>Pelanggan baru</h2>
+      <label>Nama<input name="name" required maxlength="100"></label>
+      <label>Username<input name="username" required autocapitalize="none" spellcheck="false" autocomplete="off"></label>
+      <label>Password (minimal 8 karakter)<input name="password" type="text" required minlength="8" autocomplete="off"></label>
+      <p id="addErr" class="error" role="alert"></p>
+      <div class="row-btns">
+        <button class="primary" type="submit">Buat pelanggan</button>
+        <button type="button" data-close>Batal</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dPort">
+    <div class="stack">
+      <h2>Cari port di LibreNMS</h2>
+      <input id="pq" class="search" type="search" placeholder="Nama perangkat, interface, atau deskripsi" aria-label="Cari port">
+      <ul id="pres" class="list"></ul>
+      <p id="perr" class="error" role="alert"></p>
+      <div class="row-btns"><button type="button" data-close>Tutup</button></div>
+    </div>
+  </dialog>
+
+  <script>
+    const $ = (s, el = document) => el.querySelector(s);
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    let customers = [], sel = null, services = [], editing = null;
+
+    async function api(url, method = "GET", body) {
+      const r = await fetch(url, {
+        method,
+        headers: body ? { "Content-Type": "application/json" } : {},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (r.status === 401 || r.status === 403) { location.href = "/login.html"; throw new Error("auth"); }
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || "Terjadi kesalahan");
+      return data;
+    }
+    function say(msg, bad) { const s = $("#status"); s.textContent = msg; s.className = bad ? "error" : "note"; }
+    const run = (fn) => fn().catch((e) => { if (e.message !== "auth") say(e.message, true); });
+
+    // ---------- daftar pelanggan ----------
+    function renderList() {
+      const t = $("#q").value.trim().toLowerCase();
+      const rows = customers.filter((c) => `${c.name} ${c.username}`.toLowerCase().includes(t));
+      $("#list").innerHTML = rows.length
+        ? rows.map((c) => `<li><button type="button" class="item" data-id="${c.id}" aria-pressed="${c.id === sel}">
+            <strong>${esc(c.name)}</strong>
+            <span>${esc(c.username)}, ${c.services} layanan${c.active ? "" : ", nonaktif"}</span></button></li>`).join("")
+        : `<li class="empty">${customers.length ? "Tidak ada yang cocok." : "Belum ada pelanggan."}</li>`;
+    }
+    async function loadCustomers() { customers = await api("/api/admin/customers"); renderList(); }
+
+    async function select(id) {
+      sel = id; editing = null;
+      services = await api(`/api/admin/customers/${id}/services`);
+      renderList(); renderDetail();
+    }
+
+    // ---------- detail pelanggan ----------
+    function renderDetail() {
+      const c = customers.find((x) => x.id === sel);
+      const box = $("#detail");
+      if (!c) { box.innerHTML = '<p class="empty">Pilih pelanggan di daftar, atau tambah pelanggan baru.</p>'; return; }
+      const e = editing ? services.find((s) => s.id === editing) : null;
+      box.innerHTML = `
+        <h2>${esc(c.name)}</h2>
+        <p class="note">Username: ${esc(c.username)}</p>
+
+        <form id="fCust" class="inline">
+          <label>Nama<input name="name" value="${esc(c.name)}" required maxlength="100"></label>
+          <label class="check"><input name="active" type="checkbox" ${c.active ? "checked" : ""}> Akun aktif</label>
+          <button type="submit">Simpan</button>
+        </form>
+
+        <form id="fPass" class="inline">
+          <label>Password baru<input name="password" type="text" minlength="8" required autocomplete="off" placeholder="minimal 8 karakter"></label>
+          <button type="submit">Ganti password</button>
+        </form>
+
+        <h3>Layanan</h3>
+        ${services.length ? `<div class="scroll"><table>
+          <thead><tr><th>Label</th><th>Port ID</th><th></th></tr></thead>
+          <tbody>${services.map((s) => `<tr>
+            <td>${esc(s.label)}</td><td>${s.lnms_port_id}</td>
+            <td class="act"><button type="button" data-edit="${s.id}">Ubah</button>
+                <button type="button" class="danger" data-delsvc="${s.id}">Hapus</button></td></tr>`).join("")}
+          </tbody></table></div>` : '<p class="empty">Belum ada layanan.</p>'}
+
+        <form id="fSvc" class="inline">
+          <label>Label (judul kartu)<input name="label" value="${e ? esc(e.label) : ""}" required maxlength="120"></label>
+          <label>Port ID LibreNMS<input name="port" value="${e ? e.lnms_port_id : ""}" required inputmode="numeric" pattern="[0-9]+"></label>
+          <button type="button" id="findPort">Cari port</button>
+          <button class="primary" type="submit">${e ? "Simpan perubahan" : "Tambah layanan"}</button>
+          ${e ? '<button type="button" id="cancelEdit">Batal</button>' : ""}
+        </form>
+
+        <p><button type="button" class="danger" id="delCust">Hapus pelanggan ini</button></p>`;
+    }
+
+    $("#detail").addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const f = ev.target;
+      run(async () => {
+        if (f.id === "fCust") {
+          await api(`/api/admin/customers/${sel}`, "PATCH", { name: f.name.value, active: f.active.checked });
+          await loadCustomers(); renderDetail(); say("Perubahan disimpan.");
+        } else if (f.id === "fPass") {
+          await api(`/api/admin/customers/${sel}`, "PATCH", { password: f.password.value });
+          f.reset(); say("Password diganti.");
+        } else if (f.id === "fSvc") {
+          const body = { label: f.label.value, lnms_port_id: f.port.value };
+          if (editing) await api(`/api/admin/services/${editing}`, "PATCH", body);
+          else await api(`/api/admin/customers/${sel}/services`, "POST", body);
+          editing = null; say("Layanan disimpan.");
+          await loadCustomers(); await select(sel);
+        }
+      });
+    });
+
+    $("#detail").addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (t.dataset.edit) { editing = Number(t.dataset.edit); renderDetail(); $("#fSvc input").focus(); }
+      else if (t.id === "cancelEdit") { editing = null; renderDetail(); }
+      else if (t.id === "findPort") { $("#perr").textContent = ""; $("#dPort").showModal(); $("#pq").focus(); searchPorts(); }
+      else if (t.dataset.delsvc) run(async () => {
+        if (!confirm("Hapus layanan ini?")) return;
+        await api(`/api/admin/services/${t.dataset.delsvc}`, "DELETE");
+        await loadCustomers(); await select(sel); say("Layanan dihapus.");
+      });
+      else if (t.id === "delCust") run(async () => {
+        const c = customers.find((x) => x.id === sel);
+        if (!confirm(`Hapus pelanggan "${c.name}" beserta semua layanannya?`)) return;
+        await api(`/api/admin/customers/${sel}`, "DELETE");
+        sel = null; await loadCustomers(); renderDetail(); say("Pelanggan dihapus.");
+      });
+    });
+
+    $("#list").addEventListener("click", (ev) => {
+      const b = ev.target.closest(".item");
+      if (b) run(() => select(Number(b.dataset.id)));
+    });
+    $("#q").addEventListener("input", renderList);
+
+    // ---------- tambah pelanggan ----------
+    $("#add").addEventListener("click", () => { $("#fAdd").reset(); $("#addErr").textContent = ""; $("#dAdd").showModal(); });
+    $("#fAdd").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const f = ev.target;
+      try {
+        const r = await api("/api/admin/customers", "POST",
+          { name: f.name.value, username: f.username.value, password: f.password.value });
+        $("#dAdd").close();
+        await loadCustomers(); await select(r.id); say("Pelanggan dibuat. Sekarang tambahkan layanannya.");
+      } catch (e) { if (e.message !== "auth") $("#addErr").textContent = e.message; }
+    });
+
+    // ---------- cari port ----------
+    let timer;
+    async function searchPorts() {
+      const out = $("#pres");
+      try {
+        const rows = await api(`/api/admin/ports?q=${encodeURIComponent($("#pq").value)}`);
+        $("#perr").textContent = "";
+        out.innerHTML = rows.length
+          ? rows.map((p) => `<li><button type="button" class="item" data-pid="${p.port_id}" data-alias="${esc(p.ifAlias)}">
+              <strong>${esc(p.device)}: ${esc(p.ifName)}</strong>
+              <span>ID ${p.port_id}${p.ifAlias ? ", " + esc(p.ifAlias) : ""}</span></button></li>`).join("")
+          : '<li class="empty">Port tidak ditemukan.</li>';
+      } catch (e) { if (e.message !== "auth") { out.innerHTML = ""; $("#perr").textContent = e.message; } }
+    }
+    $("#pq").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(searchPorts, 250); });
+    $("#pres").addEventListener("click", (ev) => {
+      const b = ev.target.closest("[data-pid]");
+      if (!b) return;
+      const f = $("#fSvc");
+      f.port.value = b.dataset.pid;
+      if (!f.label.value && b.dataset.alias) f.label.value = b.dataset.alias;
+      $("#dPort").close(); f.label.focus();
+    });
+
+    document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
+    $("#logout").addEventListener("click", async () => { await fetch("/api/logout", { method: "POST" }); location.href = "/login.html"; });
+
+    run(async () => {
+      const me = await api("/api/me");
+      $("#who").textContent = `${me.name} (${me.username})`;
+      await loadCustomers(); renderDetail();
+    });
+  </script>
+</body>
+</html>

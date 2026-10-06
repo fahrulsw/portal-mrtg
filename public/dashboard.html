@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Traffic Layanan Saya</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/theme.js"></script>
+</head>
+<body>
+  <div class="wrap wide">
+    <header class="bar">
+      <div>
+        <h1>Traffic Layanan Saya</h1>
+        <small id="who"></small>
+      </div>
+      <div class="bar-actions">
+        <button id="theme" type="button"></button>
+        <button id="logout" type="button">Keluar</button>
+      </div>
+    </header>
+
+    <input id="q" class="search" type="search" placeholder="Cari layanan" aria-label="Cari layanan" hidden>
+    <p id="legend" class="note" hidden>Hijau (In) di atas garis nol adalah upload Anda. Ungu (Out) di bawah garis nol adalah download Anda. Klik kartu untuk melihat grafik mingguan, bulanan, dan tahunan.</p>
+    <div id="app" class="empty">Memuat...</div>
+  </div>
+
+  <dialog id="dlg" aria-labelledby="dlg-title">
+    <div class="dlg-head">
+      <h2 id="dlg-title"></h2>
+      <button id="dlg-close" type="button">Tutup</button>
+    </div>
+    <div class="tabs" role="group" aria-label="Rentang waktu" id="tabs"></div>
+    <img id="dlg-img" alt="">
+  </dialog>
+
+  <script>
+    const PERIODS = { day: "Harian", week: "Mingguan", month: "Bulanan", year: "Tahunan" };
+    const app = document.getElementById("app");
+    const q = document.getElementById("q");
+    const dlg = document.getElementById("dlg");
+    let services = [];
+
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    function render(list) {
+      if (!list.length) { app.className = "empty"; app.textContent = "Tidak ada layanan yang cocok dengan pencarian."; return; }
+      app.className = "grid";
+      app.innerHTML = list.map((s) => `
+        <button type="button" class="card" data-id="${s.id}">
+          <h2>${esc(s.label)}</h2>
+          <img src="/graph/${s.id}/day.png?s=sm" alt="Grafik traffic harian ${esc(s.label)}" loading="lazy">
+        </button>`).join("");
+    }
+
+    function openDetail(svc, period) {
+      document.getElementById("dlg-title").textContent = svc.label;
+      document.getElementById("tabs").innerHTML = Object.entries(PERIODS).map(([p, name]) =>
+        `<button type="button" data-p="${p}" aria-pressed="${p === period}">${name}</button>`).join("");
+      const img = document.getElementById("dlg-img");
+      img.src = `/graph/${svc.id}/${period}.png`;
+      img.alt = `Grafik traffic ${svc.label}, ${PERIODS[period].toLowerCase()}`;
+      dlg.dataset.id = svc.id;
+      if (!dlg.open) dlg.showModal();
+    }
+
+    async function load() {
+      const [me, svc] = await Promise.all([fetch("/api/me"), fetch("/api/services")]);
+      if (me.status === 401 || svc.status === 401) { location.href = "/login.html"; return; }
+      const user = await me.json();
+      document.getElementById("who").textContent = `${user.name} (${user.username})`;
+      services = await svc.json();
+
+      if (!services.length) {
+        app.textContent = "Belum ada layanan yang terhubung ke akun Anda. Hubungi kami untuk aktivasi.";
+        return;
+      }
+      document.getElementById("legend").hidden = false;
+      if (services.length > 4) q.hidden = false;
+      render(services);
+    }
+
+    q.addEventListener("input", () => {
+      const t = q.value.trim().toLowerCase();
+      render(services.filter((s) => s.label.toLowerCase().includes(t)));
+    });
+
+    app.addEventListener("click", (e) => {
+      const card = e.target.closest(".card");
+      if (!card) return;
+      openDetail(services.find((s) => String(s.id) === card.dataset.id), "day");
+    });
+
+    document.getElementById("tabs").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-p]");
+      if (b) openDetail(services.find((s) => String(s.id) === dlg.dataset.id), b.dataset.p);
+    });
+
+    document.getElementById("dlg-close").addEventListener("click", () => dlg.close());
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+
+    // Gambar gagal dimuat: tampilkan pesan, bukan ikon rusak
+    document.addEventListener("error", (e) => {
+      if (e.target.tagName !== "IMG") return;
+      const p = document.createElement("p");
+      p.className = "error";
+      p.textContent = "Grafik belum bisa dimuat. Coba lagi beberapa menit lagi.";
+      e.target.replaceWith(p);
+    }, true);
+
+    document.getElementById("logout").addEventListener("click", async () => {
+      await fetch("/api/logout", { method: "POST" });
+      location.href = "/login.html";
+    });
+
+    load().catch(() => { app.className = "error"; app.textContent = "Gagal memuat data."; });
+  </script>
+</body>
+</html>

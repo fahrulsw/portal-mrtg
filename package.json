@@ -1,0 +1,19 @@
+{
+  "name": "portal-mrtg",
+  "version": "1.0.0",
+  "description": "Portal pelanggan untuk grafik traffic (data dari LibreNMS)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "seed": "node seed.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "better-sqlite3": "^11.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "express-session": "^1.18.0"
+  }
+}

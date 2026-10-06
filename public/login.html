@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Masuk - Portal Pelanggan</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/theme.js"></script>
+</head>
+<body>
+  <button id="theme" class="theme-fab" type="button"></button>
+  <main class="login">
+    <h1>Portal Pelanggan</h1>
+    <p>Masuk untuk melihat grafik traffic layanan Anda.</p>
+    <form id="f">
+      <label for="username">Username</label>
+      <input id="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <button class="primary" type="submit">Masuk</button>
+      <p id="msg" class="error" role="alert"></p>
+    </form>
+  </main>
+  <script>
+    const f = document.getElementById("f"), msg = document.getElementById("msg");
+    f.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      msg.textContent = "";
+      try {
+        const r = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: f.username.value, password: f.password.value }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok) location.href = data.admin ? "/admin.html" : "/dashboard.html";
+        else msg.textContent = data.error || "Gagal masuk. Coba lagi.";
+      } catch {
+        msg.textContent = "Tidak bisa terhubung ke server.";
+      }
+    });
+  </script>
+</body>
+</html>
