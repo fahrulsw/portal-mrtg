@@ -20,6 +20,6 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /opt/portal
+            git reset --hard origin/main
             git pull origin main
-            npm install --production
             pm2 restart portal || pm2 start server.js --name "portal"
