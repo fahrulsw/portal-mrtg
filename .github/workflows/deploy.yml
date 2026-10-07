@@ -23,4 +23,5 @@ jobs:
             git reset --hard origin/main
             git pull origin main
             pm2 restart portal || pm2 start server.js --name "portal"
+
             
