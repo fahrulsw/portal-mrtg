@@ -6,7 +6,7 @@ const bcrypt = require("bcrypt");
 const db = require("./db");
 
 // Kolom info layanan (nama kolom -> panjang maksimal). Migrasi aman: hanya menambah kolom yang belum ada.
-const SVC_COLS = { service_type: 60, pks_no: 60, vlan: 40, ip_ptp: 100, location: 100 };
+const SVC_COLS = { service_type: 60, pks_no: 60, vlan: 40, ip_ptp: 100, location: 100, smokeping_target: 100 };
 const SVC_KEYS = Object.keys(SVC_COLS);
 {
   const have = new Set(db.prepare("PRAGMA table_info(services)").all().map((c) => c.name));
@@ -110,7 +110,8 @@ app.post("/api/me/password", requireLogin, passLimiter, (req, res) => {
 // ---------- Layanan milik pelanggan ----------
 app.get("/api/services", requireLogin, (req, res) => {
   const rows = db.prepare(`SELECT id, label, ${SVC_KEYS.join(", ")} FROM services WHERE customer_id = ?`)
-                 .all(req.session.customerId);
+                 .all(req.session.customerId)
+                 .map(({ smokeping_target, ...r }) => ({ ...r, has_lat: !!(smokeping_target || (!PING_OFF && ipOf(r.ip_ptp))) }));
   res.json(rows);
 });
 
@@ -229,6 +230,150 @@ app.get("/api/traffic/:id/:period", requireLogin, async (req, res) => {
     console.error("[AGENT] gagal:", e.cause?.code || e.message);
     res.sendStatus(502);
   }
+});
+
+// ---------- Latency ping ke IP PTP pelanggan ----------
+// Server ini mem-ping IP di kolom "IP PTP" tiap PING_INTERVAL detik (default 60) dan menyimpan hasilnya.
+// Data mentah disimpan 40 hari; ringkasan per jam disimpan 400 hari (untuk grafik tahunan).
+// Syarat: perintah `ping` ada (Windows atau Linux/iputils), dan server bisa menjangkau IP PTP tersebut.
+// PING_DISABLED=1 mematikan fitur ini (frontend otomatis menyembunyikan latency).
+const { execFile } = require("child_process");
+const net = require("net");
+const PING_OFF = process.env.PING_DISABLED === "1";
+const PING_EVERY = Math.max(15, Number(process.env.PING_INTERVAL) || 60) * 1000;
+
+// SmokePing (opsional): layanan yang kolom "SmokePing target"-nya terisi (mis. PTP_Mitra.AIM) diambil dari
+// agent di mesin SmokePing. Atur SMOKEPING_URL (mis. http://10.0.0.5:3200) dan SMOKEPING_TOKEN di .env.
+// Layanan tanpa target tetap memakai ping bawaan di bawah (bila IP PTP terisi).
+const SP_URL = (process.env.SMOKEPING_URL || "").replace(/\/$/, "");
+const SP_ON = !!(SP_URL && process.env.SMOKEPING_TOKEN);
+const spCache = new Map();
+async function smokepingLatency(target, period) {
+  const key = `${target}:${period}`, hit = spCache.get(key);
+  if (hit && Date.now() - hit.t < 2 * 60 * 1000) return hit.data;
+  const r = await fetch(`${SP_URL}/latency?target=${encodeURIComponent(target)}&range=${period}`, {
+    headers: { "X-Agent-Token": process.env.SMOKEPING_TOKEN },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const x = await r.json();
+  const data = { start: x.start, step: x.step, rtt: x.rtt, loss: x.loss };
+  spCache.set(key, { data, t: Date.now() });
+  return data;
+}
+
+db.prepare("CREATE TABLE IF NOT EXISTS latency (ip TEXT NOT NULL, ts INTEGER NOT NULL, rtt REAL)").run();
+db.prepare("CREATE INDEX IF NOT EXISTS latency_ip_ts ON latency (ip, ts)").run();
+db.prepare(`CREATE TABLE IF NOT EXISTS latency_hr
+  (ip TEXT NOT NULL, hr INTEGER NOT NULL, sum REAL NOT NULL, ok INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (ip, hr))`).run();
+
+// "10.20.30.2/30" -> "10.20.30.2" (null bila bukan IP yang valid)
+const ipOf = (v) => { const h = String(v || "").trim().split("/")[0]; return net.isIP(h) ? h : null; };
+
+// Hasil: rata-rata RTT (ms) dari balasan yang diterima, atau null bila tidak ada balasan sama sekali
+// Alasan gagal dicatat di log sekali saat berubah (tidak membanjiri log tiap menit).
+// Format hasil ping dibaca untuk iputils dan BusyBox ("min/avg/max[/mdev] = a/b/c").
+const pingState = new Map();
+// Baca RTT rata-rata. Windows: tiap baris balasan berisi "TTL=" dan "time=2ms" / "time<1ms" (tidak bergantung bahasa Windows).
+// Linux/BusyBox (-q): baris ringkasan "min/avg/max[/mdev] = a/b/c".
+function parsePing(out) {
+  const t = [];
+  for (const line of String(out || "").split("\n")) {
+    if (!/TTL[=:]/i.test(line)) continue;
+    const m = /[=<]\s*(\d+(?:[.,]\d+)?)\s*ms/i.exec(line);
+    if (m) t.push(Number(m[1].replace(",", ".")));
+  }
+  if (t.length) return t.reduce((a, b) => a + b, 0) / t.length;
+  const m = /=\s*[\d.]+\/([\d.]+)\//.exec(out || "");
+  return m ? Number(m[1]) : null;
+}
+const pingIp = (ip) => new Promise((resolve) => {
+  // Windows: -n jumlah paket, -w timeout (ms). Linux/BusyBox: -c jumlah, -W timeout (detik), -w batas total.
+  const args = process.platform === "win32" ? ["-n", "2", "-w", "2000", ip] : ["-c", "2", "-W", "2", "-w", "5", "-q", ip];
+  execFile("ping", args,
+    { timeout: 10000, windowsHide: true }, (err, stdout, stderr) => {
+      const rtt = parsePing(stdout);
+      const was = pingState.get(ip);
+      if (rtt == null && was !== false) {
+        const why = err?.code === "ENOENT" ? "perintah ping tidak ditemukan"
+          : String(stderr || stdout || err?.message || "").trim().split("\n").filter(Boolean).pop();
+        console.error(`[PING] ${ip} tidak ada balasan: ${why}`);
+      } else if (rtt != null && was === false) console.log(`[PING] ${ip} pulih (${rtt} ms)`);
+      pingState.set(ip, rtt != null);
+      resolve(rtt);
+    });
+});
+
+const insRaw = db.prepare("INSERT INTO latency (ip, ts, rtt) VALUES (?, ?, ?)");
+const upHr = db.prepare(`INSERT INTO latency_hr (ip, hr, sum, ok, n) VALUES (?, ?, ?, ?, 1)
+  ON CONFLICT (ip, hr) DO UPDATE SET sum = sum + excluded.sum, ok = ok + excluded.ok, n = n + 1`);
+let pinging = false;
+async function pingAll() {
+  if (pinging) return;
+  pinging = true;
+  try {
+    const ips = [...new Set(db.prepare("SELECT DISTINCT ip_ptp FROM services WHERE ip_ptp != ''" + (SP_ON ? " AND smokeping_target = ''" : "")).all()
+      .map((r) => ipOf(r.ip_ptp)).filter(Boolean))];
+    const ts = Math.floor(Date.now() / 1000), hr = ts - (ts % 3600);
+    for (let i = 0; i < ips.length; i += 20) {
+      const batch = ips.slice(i, i + 20);
+      const out = await Promise.all(batch.map(pingIp));
+      db.transaction(() => batch.forEach((ip, j) => {
+        insRaw.run(ip, ts, out[j]);
+        upHr.run(ip, hr, out[j] ?? 0, out[j] == null ? 0 : 1);
+      }))();
+    }
+  } catch (e) { console.error("[PING] gagal:", e.message); }
+  finally { pinging = false; }
+}
+function purgeLatency() {
+  const now = Math.floor(Date.now() / 1000);
+  db.prepare("DELETE FROM latency WHERE ts < ?").run(now - 40 * 86400);
+  db.prepare("DELETE FROM latency_hr WHERE hr < ?").run(now - 400 * 86400);
+}
+if (!PING_OFF) {
+  setTimeout(pingAll, 5000).unref();
+  setInterval(pingAll, PING_EVERY).unref();
+  setTimeout(purgeLatency, 30000).unref();
+  setInterval(purgeLatency, 6 * 3600 * 1000).unref();
+}
+
+const LAT_STEP = { day: 300, week: 1800, month: 7200, year: 86400 };
+app.get("/api/latency/:id/:period", requireLogin, async (req, res) => {
+  const { id, period } = req.params;
+  if (!RANGE[period]) return res.sendStatus(404);
+
+  // cek kepemilikan, sama seperti route traffic
+  const svc = db.prepare("SELECT * FROM services WHERE id = ? AND customer_id = ?")
+                .get(intId(id), req.session.customerId);
+  if (!svc) return res.sendStatus(404);
+  if (svc.smokeping_target && SP_ON) {
+    try {
+      return res.set("Cache-Control", "private, max-age=60").json(await smokepingLatency(svc.smokeping_target, period));
+    } catch (e) {
+      console.error(`[SMOKEPING] ${svc.smokeping_target}: ${e.cause?.code || e.message}`);
+      return res.sendStatus(502);
+    }
+  }
+  const ip = !PING_OFF && ipOf(svc.ip_ptp);
+  if (!ip) return res.sendStatus(404);
+
+  const step = LAT_STEP[period], nb = RANGE[period] / step;
+  const end = Math.ceil(Date.now() / 1000 / step) * step, from = end - RANGE[period];
+  const sum = new Array(nb).fill(0), ok = new Array(nb).fill(0), cnt = new Array(nb).fill(0);
+  const add = (t, s, o, n) => {
+    const b = Math.floor((t - from) / step);
+    if (b >= 0 && b < nb) { sum[b] += s; ok[b] += o; cnt[b] += n; }
+  };
+  if (period === "year")
+    for (const r of db.prepare("SELECT hr, sum, ok, n FROM latency_hr WHERE ip = ? AND hr >= ?").all(ip, from)) add(r.hr, r.sum, r.ok, r.n);
+  else
+    for (const r of db.prepare("SELECT ts, rtt FROM latency WHERE ip = ? AND ts >= ?").all(ip, from)) add(r.ts, r.rtt ?? 0, r.rtt == null ? 0 : 1, 1);
+
+  // mulai dari bucket pertama yang punya data; bucket kosong sesudahnya = null (tidak ada data/balasan)
+  const f = cnt.findIndex((c) => c > 0);
+  const rtt = f < 0 ? [] : cnt.slice(f).map((c, i) => (ok[f + i] ? Math.round((sum[f + i] / ok[f + i]) * 100) / 100 : null));
+  res.set("Cache-Control", "private, max-age=60").json({ start: from + Math.max(f, 0) * step, step, rtt });
 });
 
 // ---------- Admin ----------
