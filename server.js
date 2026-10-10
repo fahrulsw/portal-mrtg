@@ -6,7 +6,7 @@ const bcrypt = require("bcrypt");
 const db = require("./db");
 
 // Kolom info layanan (nama kolom -> panjang maksimal). Migrasi aman: hanya menambah kolom yang belum ada.
-const SVC_COLS = { service_type: 60, pks_no: 60, vlan: 40, ip_ptp: 100, location: 100, smokeping_target: 100 };
+const SVC_COLS = { service_type: 60, pks_no: 60, vlan: 40, ip_ptp: 100, ip_public: 100, location: 100, smokeping_target: 100 };
 const SVC_KEYS = Object.keys(SVC_COLS);
 {
   const have = new Set(db.prepare("PRAGMA table_info(services)").all().map((c) => c.name));
